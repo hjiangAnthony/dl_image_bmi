@@ -30,6 +30,7 @@ import pandas as pd
 import pickle
 
 import shutil
+from tqdm import tqdm
 
 # Operations regarding to folder/file
 def copy_images(file_paths, source_folder, destination_folder):
@@ -76,7 +77,9 @@ def process_array(arr, version):
     Takes: arr: np.array
     Returns: np.array
     '''
-    img = cv2.resize(arr, (224, 224))
+    desired_size = (224, 224)
+    img = cv2.resize(arr, desired_size)
+    img = img * (1./255)
     img = np.expand_dims(img, axis=0)
     img = utils.preprocess_input(img, version=version)
     return img
@@ -102,6 +105,37 @@ def crop_img(img,x,y,w,h):
     '''
     return img[y:y+h,x:x+w,:]
 
+        
+# build a ImageDataGenerator
+from tensorflow.keras.preprocessing.image import ImageDataGenerator, array_to_img, img_to_array, load_img
+
+def single_test_generator(img_path, target_size=(224, 224), batch_size=1):
+    '''Generate a single test generator from an image file.
+    Takes:
+        - img_path: str, path to the image file
+        - target_size: tuple, target size for image resizing (default: (224, 224))
+        - batch_size: int, batch size for the generator (default: 32)
+    Returns:
+        - single_test_gen: ImageDataGenerator, generated image generator
+    '''
+    # Load the image
+    img = load_img(img_path, target_size=target_size)
+    # Convert the image to an array
+    img_array = img_to_array(img)
+    # Reshape the array to match the expected input shape of the model
+    img_array = img_array.reshape((1,) + img_array.shape)
+    # Create an instance of ImageDataGenerator
+    test_datagen = ImageDataGenerator(
+        rescale = 1./255,
+        shear_range = 0.2,
+        zoom_range = 0.2,
+        horizontal_flip = True)
+    # Generate the images
+    single_test_gen = test_datagen.flow(img_array, batch_size=batch_size)
+
+    return single_test_gen
+
+
 def img_data_generator(data, bs, img_dir, train_mode=True, version = 1): #replace function name later
     """data input pipeline
     Takes:
@@ -124,13 +158,14 @@ def img_data_generator(data, bs, img_dir, train_mode=True, version = 1): #replac
             if len(data) >= bs:
                 sampled = data.iloc[:bs,:]
                 data = data.iloc[bs:,:]
-                features = imgs_to_array(sampled['index'],img_dir, version)
+                features = imgs_to_array(sampled['index'], img_dir, version)
             else: 
                 loop = False
         yield features
 
-# Build a prediction class
 
+
+# Build a prediction class
 class FacePrediction(object):
 
     def __init__(self, img_dir, model_type='vgg16'):
@@ -214,32 +249,49 @@ class FacePrediction(object):
         res = [process_array(i, self.version) for i in res]
         return box, res
 
+
+
     def predict(self, img_input_dir, input_generator=None, input_df=None, show_img=False):
         if os.path.isdir(img_input_dir) and input_generator is not None:
             # Predict using the data generator
-              preds = self.model.predict_generator(input_generator)
+            preds = self.model.predict_generator(input_generator)
 
-              if show_img and (input_df is not None):
-                  bmi = preds
-                  num_plots = len(input_df['path'])
-                  ncols = 5
-                  nrows = int((num_plots - 0.1) // ncols + 1)
-                  fig, axs = plt.subplots(nrows, ncols)
-                  fig.set_size_inches(3 * ncols, 3 * nrows)
-                  for i, img_path in enumerate(input_df['path']):
-                      col = i % ncols
-                      row = i // ncols
-                      img = plt.imread(img_path)
-                      axs[row, col].imshow(img)
-                      axs[row, col].axis('off')
-                      axs[row, col].set_title('BMI: {:3.1f}'.format(bmi[i, 0], fontsize=10))
-              return preds
+            if show_img and (input_df is not None):
+                bmi = preds
+                num_plots = len(input_df['path'])
+                ncols = 5
+                nrows = int((num_plots - 0.1) // ncols + 1)
+                fig, axs = plt.subplots(nrows, ncols)
+                fig.set_size_inches(3 * ncols, 3 * nrows)
+                for i, img_path in enumerate(input_df['path']):
+                    col = i % ncols
+                    row = i // ncols
+                    img = plt.imread(img_path)
+                    axs[row, col].imshow(img)
+                    axs[row, col].axis('off')
+                    axs[row, col].set_title('BMI: {:3.1f}'.format(bmi[i, 0], fontsize=10))
+            return preds
 
         else:
-            img_path = img_input_dir
-            arr = img_to_array(img_path, self.version)
-            preds = self.model.predict(arr)
+            single_test_gen = single_test_generator(img_input_dir)
+            
+            if show_img:
+                img_path = img_input_dir
+                img = plt.imread(img_path)
+                fig, ax = plt.subplots()
+                ax.imshow(img)
+                ax.axis('off')
+                #preds = self.model.predict(img_to_array(img_path, self.version))
+                preds = self.model.predict_generator(single_test_gen)
+                ax.set_title('BMI: {:3.1f}'.format(preds[0, 0], fontsize=10))
+                plt.show()
+
+            preds = self.model.predict_generator(single_test_gen)
+            #preds = self.model.predict(img_to_array(img_path, self.version))
             return preds
+
+
+
 
 
     def predict_df(self, img_dir):
