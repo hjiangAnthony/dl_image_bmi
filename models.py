@@ -12,7 +12,7 @@ import keras_vggface.utils as utils
 # image manipulation
 from matplotlib import pyplot as plt
 import matplotlib.patches as patches
-from PIL import Image
+from PIL import Image, ImageDraw
 import cv2
 
 # face alignment
@@ -31,6 +31,8 @@ import pickle
 
 import shutil
 from tqdm import tqdm
+import tempfile
+import hashlib
 
 # Operations regarding to folder/file
 def copy_images(file_paths, source_folder, destination_folder):
@@ -80,7 +82,7 @@ def process_array(arr, version):
     desired_size = (224, 224)
     img = cv2.resize(arr, desired_size)
     img = img * (1./255)
-    img = np.expand_dims(img, axis=0)
+    #img = np.expand_dims(img, axis=0)
     img = utils.preprocess_input(img, version=version)
     return img
 
@@ -104,6 +106,15 @@ def crop_img(img,x,y,w,h):
     Returns: np.array
     '''
     return img[y:y+h,x:x+w,:]
+
+def array_to_img(arr):
+    '''Converts a numpy array to an image.
+    Takes: arr: np.array
+    Returns: PIL.Image
+    '''
+    # Convert array to image
+    img = Image.fromarray(np.uint8(arr*255))
+    return img
 
         
 # build a ImageDataGenerator
@@ -135,6 +146,10 @@ def single_test_generator(img_path, target_size=(224, 224), batch_size=1):
 
     return single_test_gen
 
+# Create the ImageDataGenerator for the test_data
+test_datagen = ImageDataGenerator(
+    #preprocessing_function=lambda x: (x - mean_pixel_value) / 255.0,
+    rescale = 1./255)
 
 def img_data_generator(data, bs, img_dir, train_mode=True, version = 1): #replace function name later
     """data input pipeline
@@ -197,14 +212,14 @@ class FacePrediction(object):
                 layer.trainable = False
                 
         def model_init(flatten, name):
-            x = Dense(64, name=name + '_fc1')(flatten)
-            x = BatchNormalization(name = name + '_bn1')(x)
-            x = Activation('relu', name = name+'_act1')(x)
-            x = Dropout(0.2)(x)
-            x = Dense(64, name=name + '_fc2')(x)
-            x = BatchNormalization(name = name + '_bn2')(x)
-            x = Activation('relu', name = name+'_act2')(x)
-            x = Dropout(drop_rate)(x)
+            # x = Dense(64, name=name + '_fc1')(flatten)
+            # x = BatchNormalization(name = name + '_bn1')(x)
+            # x = Activation('relu', name = name+'_act1')(x)
+            # x = Dropout(0.2)(x)
+            # x = Dense(64, name=name + '_fc2')(x)
+            # x = BatchNormalization(name = name + '_bn2')(x)
+            # x = Activation('relu', name = name+'_act2')(x)
+            # x = Dropout(drop_rate)(x)
             x = flatten
             return x
         
@@ -249,6 +264,136 @@ class FacePrediction(object):
         res = [process_array(i, self.version) for i in res]
         return box, res
 
+    def crop_image_around_face(self, img, box, crop_percentage):
+        x, y, width, height = box['box']
+        center_x = x + (width // 2)
+        center_y = y + (height // 2)
+        crop_width = int(width * crop_percentage)
+        crop_height = int(height * crop_percentage)
+        crop_left = max(0, center_x - (crop_width // 2))
+        crop_top = max(0, center_y - (crop_height // 2))
+        crop_right = min(img.width, crop_left + crop_width)
+        crop_bottom = min(img.height, crop_top + crop_height)
+        cropped_img = img.crop((crop_left, crop_top, crop_right, crop_bottom))
+        return cropped_img
+
+    def process_input_image(self, img_input_path):
+        img = Image.open(img_input_path)
+
+        # Check image size
+        if img.size == (244, 244):
+            return img_input_path
+        else:
+            # Detect faces and crop
+            confidence_threshold = 0.5
+            boxes, cropped_images = self.detect_faces(img_input_path, confidence_threshold)
+
+            if len(cropped_images) > 0:
+                # Save the cropped image in a temporary folder
+                tmp_folder = 'tmp'
+                os.makedirs(tmp_folder, exist_ok=True)
+
+                # Generate hash value from the image input path
+                hash_value = hashlib.sha1(img_input_path.encode()).hexdigest()
+
+                tmp_img_path = os.path.join(tmp_folder, hash_value + 'temp_image.bmp')
+
+                # Print confidence for each detected face
+                for i, box in enumerate(boxes):
+                    confidence = box['confidence']
+                    print(f"Face {i + 1}: Confidence - {confidence}")
+
+                    # Crop the image around the detected face
+                    cropped_img = self.crop_image_around_face(img, box, crop_percentage=1.25)
+
+                # Save the cropped image
+                cropped_img.save(tmp_img_path)
+
+                return tmp_img_path
+            else:
+                # No faces detected, return the original image
+                return img_input_path
+
+
+    # def predict_external(self, img_input_dir, input_generator=None, input_df=None, show_img=False):
+    #     if os.path.isdir(img_input_dir) and input_generator is not None:
+    #         return None
+
+    #     else:
+    #         single_test_path = self.process_input_image(img_input_dir)
+    #         single_test_gen = single_test_generator(single_test_path)
+
+    #         if show_img:
+    #             img_path = img_input_dir
+    #             img = plt.imread(single_test_path)
+    #             fig, ax = plt.subplots()
+    #             ax.imshow(img)
+    #             ax.axis('off')
+    #             #preds = self.model.predict(img_to_array(img_path, self.version))
+    #             preds = self.model.predict_generator(single_test_gen)
+    #             ax.set_title('BMI: {:3.1f}'.format(preds[0, 0], fontsize=10))
+    #             plt.show()
+
+    #         preds = self.model.predict_generator(single_test_gen)
+    #         return preds
+
+    def predict_external(self, img_input_dir, input_df=None, image_width=244, image_height=244, batch_size=32, show_img=False):
+        if os.path.isdir(img_input_dir) and input_df is not None:
+            # Predict using the data generator
+            test_df = input_df
+            processed_img_paths = [self.process_input_image(i) for i in test_df['path']]
+            processed_img_names = [i.split('/')[-1] for i in processed_img_paths]
+            processed_img_dir = '/'.join(processed_img_paths[0].split('/')[:-1])
+            test_df['processed_paths'], test_df['processed_names'] = processed_img_paths, processed_img_names
+            
+
+            # Load the test data with target data
+            test_set_gen = test_datagen.flow_from_dataframe(
+                test_df,
+                directory = img_input_dir,
+                x_col='name',
+                y_col='bmi',
+                target_size=(image_width, image_height),
+                batch_size=batch_size,
+                color_mode='rgb',
+                class_mode='raw')
+
+            preds = self.model.predict_generator(test_set_gen)
+
+            if show_img and (test_df is not None):
+                bmi = preds
+                num_plots = len(test_df['path'])
+                ncols = 5
+                nrows = int((num_plots - 0.1) // ncols + 1)
+                fig, axs = plt.subplots(nrows, ncols)
+                fig.set_size_inches(3 * ncols, 3 * nrows)
+                for i, img_path in enumerate(test_df['path']):
+                    col = i % ncols
+                    row = i // ncols
+                    img = plt.imread(img_path)
+                    axs[row, col].imshow(img)
+                    axs[row, col].axis('off')
+                    axs[row, col].set_title('BMI: {:3.1f}'.format(bmi[i, 0], fontsize=10))
+            return preds
+
+        else:
+            # Single image input
+            single_test_path = self.process_input_image(img_input_dir)
+            single_test_gen = single_test_generator(single_test_path)
+
+            if show_img:
+                img_path = img_input_dir
+                img = plt.imread(single_test_path)
+                fig, ax = plt.subplots()
+                ax.imshow(img)
+                ax.axis('off')
+                preds = self.model.predict_generator(single_test_gen)
+                ax.set_title('BMI: {:3.1f}'.format(preds[0, 0], fontsize=10))
+                plt.show()
+
+            preds = self.model.predict_generator(single_test_gen)
+            return preds
+
 
 
     def predict(self, img_input_dir, input_generator=None, input_df=None, show_img=False):
@@ -289,9 +434,6 @@ class FacePrediction(object):
             preds = self.model.predict_generator(single_test_gen)
             #preds = self.model.predict(img_to_array(img_path, self.version))
             return preds
-
-
-
 
 
     def predict_df(self, img_dir):
